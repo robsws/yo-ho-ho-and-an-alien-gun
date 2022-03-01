@@ -21,6 +21,7 @@ fn main() {
         .add_startup_system(player_setup)
         .add_startup_system(lighting_setup)
         .add_startup_system(debug_setup)
+        .add_startup_system(scenery_setup)
         .add_system(
             player_input_handler
                 .with_run_criteria(FixedTimestep::step(0.05))
@@ -99,7 +100,6 @@ impl SteeringWheel {
             -std::f32::consts::TAU * 3.0, 
             std::f32::consts::TAU * 3.0
         );
-        info!("steering wheel value is {}", self.angle);
     }
 }
 
@@ -129,7 +129,7 @@ fn player_setup(
             steering_wheel: SteeringWheel {
                 angle: 0.0
             },
-            speed: 1.0
+            speed: 0.1
         })
         .insert(Player {});
         // Create the camera, parented to player location
@@ -168,6 +168,25 @@ fn lighting_setup(
         },
         ..Default::default()
     });
+}
+
+#[derive(Component)]
+struct World;
+
+fn scenery_setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>
+) {
+    commands.spawn_bundle(PbrBundle {
+        ..Default::default()
+    }).with_children(|world| {
+        world.spawn_bundle(PbrBundle {
+            transform: Transform::from_translation(Vec3::new(5.0, 0.0, 5.0)),
+            ..Default::default()
+        }).with_children(|parent| {
+            parent.spawn_scene(asset_server.load("models/nature/cliff_rock.glb#Scene0"));
+        });
+    }).insert(World);
 }
 
 #[derive(Default)]
@@ -215,12 +234,16 @@ fn player_input_handler(
 }
 
 fn ship_movement(
-    mut ships: Query<(&Ship, &mut Transform)>
+    mut ships: Query<(&Ship, &mut Transform)>,
+    mut world_transforms: Query<&mut Transform, (With<World>, Without<Ship>)>
 ) {
-    for (ship, mut transform) in ships.iter_mut() {
+    for (ship, mut ship_transform) in ships.iter_mut() {
         let rotation_angle = ship.steering_wheel.angle / 900.0;
-        transform.rotate(Quat::from_rotation_y(rotation_angle));
-        // transform.translate()
+        ship_transform.rotate(Quat::from_rotation_y(rotation_angle));
+        let backward = ship_transform.local_z();
+        if let Some(mut world_transform) = world_transforms.iter_mut().next() {
+            world_transform.translation += backward * ship.speed;
+        }
     }
 }
 
