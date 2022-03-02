@@ -3,7 +3,7 @@ use bevy::{
 };
 use bevy_prototype_debug_lines::*;
 
-const ENEMY_CANNON_RANGE: f32 = 1.0;
+const ENEMY_CANNON_RANGE: f32 = 20.0;
 
 fn main() {
     App::new()
@@ -124,6 +124,10 @@ impl SteeringWheel {
     }
 }
 
+struct CannonballModel {
+    model: Handle<Scene>
+}
+
 fn player_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>
@@ -132,15 +136,9 @@ fn player_setup(
     commands.spawn_bundle(PbrBundle {
         ..Default::default()
     }).with_children(|ship| {
-        ship.spawn_bundle(PbrBundle {
-            transform: Transform::from_translation(Vec3::new(0.75, 0.0, 0.0)),
-            ..Default::default()
-        }).with_children(|parent| {
-            // player model
-            parent.spawn_scene(
-                asset_server.load("models/pirate/ship_light.gltf#Scene0")
-            );
-        });
+        ship.spawn_scene(
+            asset_server.load("models/pirate/ship_light.glb#Scene0")
+        );
     })
     .insert(Ship {
         steering_wheel: SteeringWheel {
@@ -193,6 +191,10 @@ fn world_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>
 ) {
+    // Load the cannonball
+    let _cannonball: Handle<Scene> =
+        asset_server.load("models/pirate/cannonball.gltf#Scene0");
+    // Load the world
     commands.spawn_bundle(PbrBundle {
         ..Default::default()
     }).with_children(|world| {
@@ -214,10 +216,12 @@ fn world_setup(
             transform: Transform::from_translation(Vec3::new(-10.0, 0.0, 0.0)),
             ..Default::default()
         }).with_children(|parent| {
-            parent.spawn_scene(asset_server.load("models/pirate/ship_dark.gltf#Scene0"));
+            parent.spawn_scene(
+                asset_server.load("models/pirate/ship_dark.glb#Scene0")
+            );
         }).insert(Ship {
             steering_wheel: SteeringWheel { angle: 0.0 },
-            speed: 0.1
+            speed: 0.0
         });
     }).insert(World);
 }
@@ -266,9 +270,11 @@ fn player_input_handler(
 
 fn player_movement(
     mut player_ships: Query<(&Ship, &mut Transform), With<Player>>,
-    mut world_transforms: Query<&mut Transform, (With<World>, Without<Ship>)>
+    mut world_transforms: Query<&mut Transform, (With<World>, Without<Ship>)>,
+    mut _debug_text: Query<&mut Text, With<DebugText>>,
 ) {
     for (ship, mut ship_transform) in player_ships.iter_mut() {
+        info!("{}", ship.steering_wheel.angle);
         let rotation_angle = ship.steering_wheel.angle / 900.0;
         ship_transform.rotate(Quat::from_rotation_y(rotation_angle));
         let backward = ship_transform.local_z();
@@ -280,11 +286,13 @@ fn player_movement(
 
 fn enemy_movement(
     mut enemy_ships: Query<(&Ship, &mut Transform), Without<Player>>,
+    mut _debug_text: Query<&mut Text, With<DebugText>>
 ) {
     for (ship, mut ship_transform) in enemy_ships.iter_mut() {
         let rotation_angle = ship.steering_wheel.angle / 900.0;
         ship_transform.rotate(Quat::from_rotation_y(rotation_angle));
         let forward = ship_transform.forward();
+        // update_debug_text(&mut debug_text, format!("{:?}", forward));
         ship_transform.translation += forward * ship.speed;
     }
 }
@@ -298,44 +306,77 @@ fn update_debug_text(
     }
 }
 
+fn enemy_debug(
+    mut enemy_ships: Query<(&mut Ship, &GlobalTransform), Without<Player>>,
+    time: Res<Time>,
+) {
+    for (mut enemy_ship, enemy_transform) in enemy_ships.iter_mut() {
+        enemy_ship.steering_wheel.angle = time.seconds_since_startup().sin() as f32 * 18.0;
+    }
+}
+
 fn enemy_ai(
     mut enemy_ships: Query<(&mut Ship, &GlobalTransform), Without<Player>>,
-    mut debug_text: Query<&mut Text, With<DebugText>>
+    mut debug_text: Query<&mut Text, With<DebugText>>,
+    asset_server: Res<AssetServer>,
+    mut lines: ResMut<DebugLines>
 ) {
     // Try and move into range of the player so that they
     // are side on, so that they can fire cannons
     // i.e. they want to be at a tangent to the circle surrounding the
     // player of radius cannon range
     for (mut enemy_ship, enemy_transform) in enemy_ships.iter_mut() {
-        align_enemy_to_player_vector(
-            &mut enemy_ship,
-            enemy_transform,
-            &mut debug_text, 
-            enemy_transform.translation.length() > ENEMY_CANNON_RANGE
+        // align_enemy_to_player_vector(
+        //     &mut enemy_ship,
+        //     enemy_transform,
+        //     &mut debug_text
+        // );
+        fire_cannon(
+            &enemy_transform,
+            &asset_server,
+            &mut debug_text
         );
+        lines.line(enemy_transform.translation, enemy_transform.translation + enemy_transform.forward() * 10.0, 0.0);
     }
 }
 
 fn align_enemy_to_player_vector(
-    mut enemy: &mut Ship,
+    enemy: &mut Ship,
     transform: &GlobalTransform,
     debug_text: &mut Query<&mut Text, With<DebugText>>,
-    turn_away: bool
 ) {
-    let direction = if turn_away { 1.0 } else { -1.0 };
-    // let angle_to_player = transform.forward().angle_between(direction * transform.translation);
     let angle_to_player = transform.forward().angle_between(-transform.translation);
-    update_debug_text(debug_text, format!("angle: {:?}\ndist: {:?}\n steer: {:?}",angle_to_player,transform.translation.length(),enemy.steering_wheel.angle));
-    if angle_to_player >= std::f32::consts::FRAC_PI_2 {
-        enemy.steering_wheel.turn(-0.2);
+    if is_to_left_of_player(transform) {
+        enemy.steering_wheel.angle = angle_to_player * 6.0;
+    } else {
+        enemy.steering_wheel.angle = angle_to_player * -6.0;
     }
-    else if angle_to_player <= -std::f32::consts::FRAC_PI_2 {
-        enemy.steering_wheel.turn(0.2);
+}
+
+fn fire_cannon(
+    enemy_transform: &GlobalTransform,
+    asset_server: &Res<AssetServer>,
+    debug_text: &mut Query<&mut Text, With<DebugText>>,
+) {
+    let angle = enemy_transform.forward().angle_between(-enemy_transform.translation);
+    if enemy_transform.translation.length() <= ENEMY_CANNON_RANGE {
+        if angle > std::f32::consts::FRAC_PI_2 - 0.1 && angle < std::f32::consts::FRAC_PI_2 + 0.1 {
+            if is_to_left_of_player(enemy_transform) {
+                update_debug_text(debug_text, format!("angle: {:?}\ndist: {:?}\n FIRE LEFT!",angle,enemy_transform.translation.length()));
+            } else {
+                update_debug_text(debug_text, format!("angle: {:?}\ndist: {:?}\n FIRE RIGHT!",angle,enemy_transform.translation.length()));
+            }
+        } else {
+            update_debug_text(debug_text, format!("angle: {:?}\ndist: {:?}\n angle not aligned",angle,enemy_transform.translation.length()));
+        }
+    } else {
+        update_debug_text(debug_text, format!("angle: {:?}\ndist: {:?}\n out of range",angle,enemy_transform.translation.length()));
     }
-    else if angle_to_player > 0.0 && enemy.steering_wheel.angle < 3.0 {
-        enemy.steering_wheel.turn(0.1);
-    }
-    else if angle_to_player < 0.0 && enemy.steering_wheel.angle > -3.0 {
-        enemy.steering_wheel.turn(-0.1);
-    }
+}
+
+fn is_to_left_of_player(
+    enemy_transform: &GlobalTransform
+) -> bool {
+    let right = enemy_transform.right();
+    (-enemy_transform.translation).dot(right) < 0.0
 }
