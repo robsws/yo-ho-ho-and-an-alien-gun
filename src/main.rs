@@ -11,6 +11,8 @@ const CANNONBALL_SPEED: f32 = 0.4;
 const CANNON_COOLDOWN: f64 = 5.0;
 const LASER_COOLDOWN: f64 = 1.0;
 const LASER_TIMEOUT: f64 = 0.3;
+const SPAWN_COOLDOWN: f64 = 5.0;
+const ENEMY_COUNT: i32 = 10;
 
 fn main() {
     App::new()
@@ -27,6 +29,7 @@ fn main() {
         })
         .insert_resource(ClearColor(Color::rgb(0.0, 0.4, 0.6)))
         .insert_resource(PreviousInput::default())
+        .insert_resource(EnemyCounter {to_spawn: ENEMY_COUNT, dead: 0})
         .add_plugins(DefaultPlugins)
         .add_plugin(DebugLinesPlugin::default())
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
@@ -34,8 +37,8 @@ fn main() {
         .add_startup_system(camera_setup)
         .add_startup_system(player_setup)
         .add_startup_system(lighting_setup)
-        .add_startup_system(debug_setup)
-        .add_startup_system(enemy_setup)
+        .add_startup_system(hud_setup)
+        .add_startup_system(spawner_setup)
         // Player input system
         .add_system(
             player_input_handler
@@ -46,6 +49,10 @@ fn main() {
         .add_system(
             laser_gun_handler
                 .label(Pipeline::Input)
+        )
+        .add_system(
+            enemy_spawner
+                .label(Pipeline::Spawner)
         )
         // // Enemy AI system
         .add_system(
@@ -74,13 +81,21 @@ fn main() {
                 .label(Pipeline::LaserCleanup)
                 .after(Pipeline::Input)
         )
+        .add_system(
+            hud_handler
+                .label(Pipeline::HUD)
+                .after(Pipeline::ShipMovement)
+                .after(Pipeline::Input)
+                .after(Pipeline::CannonballMovement)
+                .after(Pipeline::AI)
+        )
         .run();
 }
 
 #[derive(Component)]
-struct DebugText;
+struct HUD;
 
-fn debug_setup(
+fn hud_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>
 ) {
@@ -108,16 +123,18 @@ fn debug_setup(
         ),
         ..Default::default()
     })
-    .insert(DebugText);
+    .insert(HUD);
 }
 
 #[derive(SystemLabel, Debug, Hash, PartialEq, Eq, Clone)]
 enum Pipeline {
     Input,
+    Spawner,
     AI,
     ShipMovement,
     CannonballMovement,
-    LaserCleanup
+    LaserCleanup,
+    HUD
 }
 
 #[derive(Component)]
@@ -126,7 +143,7 @@ struct Player;
 #[derive(Component)]
 struct Ship {
     steering_wheel: SteeringWheel,
-    health: u32
+    health: i32
 }
 #[derive(Component)]
 struct Cannon {
@@ -160,6 +177,17 @@ struct Laser {
     fired: f64
 }
 
+#[derive(Component)]
+struct Spawner {
+    last_spawned: f64,
+    until_next: f64
+}
+
+struct EnemyCounter {
+    to_spawn: i32,
+    dead: i32
+}
+
 fn player_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>
@@ -169,7 +197,6 @@ fn player_setup(
         position: Vec3::new(0.0, 0.0, 0.0).into(),
         forces: RigidBodyForces {
             gravity_scale: 0.0,
-            // torque: Vec3::new(140.0, 80.0, 20.0).into(),
             ..Default::default()
         }.into(),
         damping: RigidBodyDamping { linear_damping: 3.0, angular_damping: 3.0 }.into(),
@@ -217,64 +244,95 @@ fn player_setup(
         steering_wheel: SteeringWheel {
             angle: 0.0,
         },
-        health: 100
+        health: 200
     })
     .insert(Player);
 }
 
-
-fn enemy_setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>
+fn spawner_setup(
+    mut commands: Commands
 ) {
-    // Create enemies
-    commands.spawn_bundle(RigidBodyBundle {
-        position: Vec3::new(-20.0, 0.0, -15.0).into(),
-        forces: RigidBodyForces {
-            gravity_scale: 0.0,
-            // torque: Vec3::new(140.0, 80.0, 20.0).into(),
-            ..Default::default()
-        }.into(),
-        damping: RigidBodyDamping { linear_damping: 3.0, angular_damping: 3.0 }.into(),
-        mass_properties: (
-            RigidBodyMassPropsFlags::TRANSLATION_LOCKED_Y |
-            RigidBodyMassPropsFlags::ROTATION_LOCKED_X |
-            RigidBodyMassPropsFlags::ROTATION_LOCKED_Z
-        ).into(),
-        ..Default::default()
-    })
-    .insert_bundle(ColliderBundle {
-        shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
-        collider_type: ColliderType::Solid.into(),
-        material: ColliderMaterial { friction: 2.0, restitution: 0.9, ..Default::default() }.into(),
-        mass_properties: ColliderMassProps::Density(4.0).into(),
-        ..Default::default()
-    })
-    .insert(Transform::default())
-    .insert(RigidBodyPositionSync::Discrete)
-    .insert(RigidBodyTypeComponent::from(RigidBodyType::Dynamic))
-    // .insert(ColliderDebugRender::with_id(1))
-    .with_children(|ship| {
-        // Add ship model
-        ship.spawn_scene(
-            asset_server.load("models/pirate/ship_dark.glb#Scene0")
-        );
-    })
-    .insert(Ship {
-        steering_wheel: SteeringWheel {
-            angle: 0.0
-        },
-        health: 20
-    }).insert(Cannon {
-        last_fired: 0.0
-    });
+    for x in [-40.0, 40.0] {
+        for z in [-40.0, 40.0] {
+            commands.spawn_bundle(PbrBundle {
+                transform: Transform::from_translation(Vec3::new(x, 0.0, z)),
+                ..Default::default()
+            }).insert(Spawner { last_spawned: 0.0, until_next: 0.0} );
+        }
+    }
+}
+
+fn enemy_spawner(
+    mut commands: Commands,
+    mut spawners: Query<(&mut Spawner, &Transform)>,
+    enemies: Query<&Ship, Without<Player>>,
+    asset_server: Res<AssetServer>,
+    mut enemy_counter: ResMut<EnemyCounter>,
+    time: Res<Time>
+) {
+    if enemies.iter().count() >= 6 || enemy_counter.to_spawn <= 0 {
+        return;
+    }
+    for (mut spawner, spawner_t) in spawners.iter_mut() {
+        let now = time.seconds_since_startup();
+        let since_last_spawn = now - spawner.last_spawned;
+        if since_last_spawn > spawner.until_next {
+            spawner.last_spawned = now;
+            spawner.until_next = rand::random::<f64>() * 20.0 + 20.0;
+            enemy_counter.to_spawn -= 1;
+            // Create enemy entity
+            commands.spawn_bundle(RigidBodyBundle {
+                position: (
+                    spawner_t.translation.clone(),
+                    Quat::from_rotation_y(rand::random::<f32>() * consts::TAU)
+                ).into(),
+                forces: RigidBodyForces {
+                    gravity_scale: 0.0,
+                    // torque: Vec3::new(140.0, 80.0, 20.0).into(),
+                    ..Default::default()
+                }.into(),
+                damping: RigidBodyDamping { linear_damping: 3.0, angular_damping: 3.0 }.into(),
+                mass_properties: (
+                    RigidBodyMassPropsFlags::TRANSLATION_LOCKED_Y |
+                    RigidBodyMassPropsFlags::ROTATION_LOCKED_X |
+                    RigidBodyMassPropsFlags::ROTATION_LOCKED_Z
+                ).into(),
+                ..Default::default()
+            })
+            .insert_bundle(ColliderBundle {
+                shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
+                collider_type: ColliderType::Solid.into(),
+                material: ColliderMaterial { friction: 2.0, restitution: 0.9, ..Default::default() }.into(),
+                mass_properties: ColliderMassProps::Density(4.0).into(),
+                ..Default::default()
+            })
+            .insert(Transform::default())
+            .insert(RigidBodyPositionSync::Discrete)
+            .insert(RigidBodyTypeComponent::from(RigidBodyType::Dynamic))
+            // .insert(ColliderDebugRender::with_id(1))
+            .with_children(|ship| {
+                // Add ship model
+                ship.spawn_scene(
+                    asset_server.load("models/pirate/ship_dark.glb#Scene0")
+                );
+            })
+            .insert(Ship {
+                steering_wheel: SteeringWheel {
+                    angle: 0.0
+                },
+                health: 40
+            }).insert(Cannon {
+                last_fired: 0.0
+            });
+        }
+    }
 }
 
 fn camera_setup(
     mut commands: Commands
 ) {
     let mut camera = OrthographicCameraBundle::new_3d();
-    camera.orthographic_projection.scale = 15.0;
+    camera.orthographic_projection.scale = 20.0;
     camera.transform = Transform::from_xyz(60.0, 60.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y);
     commands.spawn_bundle(camera);
 }
@@ -317,7 +375,6 @@ fn player_input_handler(
     axes: Res<Axis<GamepadAxis>>,
     mut prev_input: ResMut<PreviousInput>,
     mut player_ships: Query<&mut Ship, With<Player>>,
-    mut debug_text: Query<&mut Text, With<DebugText>>,
 
 ) {
     if let Some(mut player_ship) = player_ships.iter_mut().next() {
@@ -346,7 +403,6 @@ fn player_input_handler(
             player_ship.steering_wheel.turn(delta_angle);
             prev_input.angle = new_angle;
         }
-        update_debug_text(&mut debug_text, format!("health: {}", player_ship.health))
     }
 }
 
@@ -364,7 +420,9 @@ fn laser_gun_handler(
     mut lines: ResMut<DebugLines>,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut enemy_counter: ResMut<EnemyCounter>,
+    enemies: Query<&Ship, Without<Player>>
 ) {
     if let Some(gamepad) = gamepads.iter().next() {
         if let Some((laser_ent, mut laser_com, laser_t)) = lasers.iter_mut().next() {
@@ -408,7 +466,10 @@ fn laser_gun_handler(
                     // The first collider hit has the handle `handle`. The `hit` is a
                     // structure containing details about the hit configuration.
                     println!("Hit the entity {:?} with the configuration: {:?}", handle.entity(), hit);
-                    commands.entity(handle.entity()).despawn_recursive();
+                    if let Ok(_) = enemies.get(handle.entity()) {
+                        commands.entity(handle.entity()).despawn_recursive();
+                        enemy_counter.dead += 1;
+                    }
                 }
             }
         }
@@ -439,7 +500,6 @@ fn ship_movement(
         &mut RigidBodyForcesComponent,
         &mut RigidBodyMassPropsComponent
     )>,
-    mut _debug_text: Query<&mut Text, With<DebugText>>
 ) {
     for (ship, t, mut rbf, mut rbmp) in ships.iter_mut() {
         let centre_of_rotation = t.translation + t.left() * (ship.steering_wheel.angle / 4.0);
@@ -451,26 +511,20 @@ fn ship_movement(
     }
 }
 
-
-fn update_debug_text(
-    text_query: &mut Query<&mut Text, With<DebugText>>,
-    message: String
-) {
-    if let Some(mut text_box) = text_query.iter_mut().next() {
-        text_box.sections[0].value = message;
-    }
-}
-
 fn enemy_movement_ai(
     mut commands: Commands,
-    mut enemy_ships: Query<(&mut Ship, &Transform), Without<Player>>,
+    mut enemy_ships: Query<(Entity, &mut Ship, &Transform), Without<Player>>,
     mut player_ts: Query<&Transform, With<Player>>,
-    mut debug_text: Query<&mut Text, With<DebugText>>,
-    mut lines: ResMut<DebugLines>
+    mut lines: ResMut<DebugLines>,
+    mut enemy_counter: ResMut<EnemyCounter>
 ) {
     // Try and move into range of the player
     if let Some(player_t) = player_ts.iter().next() {
-        for (mut enemy_ship, t) in enemy_ships.iter_mut() {
+        for (enemy_ent, mut enemy_ship, t) in enemy_ships.iter_mut() {
+            if enemy_ship.health <= 0 {
+                commands.entity(enemy_ent).despawn_recursive();
+                enemy_counter.dead += 1;
+            };
             let vec_to_player = player_t.translation - t.translation;
             let angle_to_player =
                 t.forward().angle_between(vec_to_player);
@@ -493,7 +547,6 @@ fn cannon_ai(
     mut player_ts: Query<&Transform, With<Player>>,
     mut cannons: Query<(&mut Cannon, &Transform), Without<Player>>,
     asset_server: Res<AssetServer>,
-    mut debug_text: Query<&mut Text, With<DebugText>>,
     time: Res<Time>
 ) {
     if let Some(player_t) = player_ts.iter().next() {
@@ -512,10 +565,10 @@ fn cannon_ai(
             {
                 if is_to_left_of_player(player_t, t) {
                     // fire to the left
-                    fire_cannon(&mut commands, t, t.left(), &asset_server, &mut debug_text);
+                    fire_cannon(&mut commands, t, t.left(), &asset_server);
                 } else {
                     // fire to the right
-                    fire_cannon(&mut commands, t, t.right(), &asset_server, &mut debug_text);
+                    fire_cannon(&mut commands, t, t.right(), &asset_server);
                 }
                 cannon.last_fired = time.seconds_since_startup();
             }
@@ -528,7 +581,6 @@ fn fire_cannon(
     enemy_transform: &Transform,
     direction: Vec3,
     asset_server: &Res<AssetServer>,
-    debug_text: &mut Query<&mut Text, With<DebugText>>,
 ) {
     let cannonball = asset_server.load("models/pirate/cannonball.glb#Scene0");
     // commands.spawn_bundle(PbrBundle {
@@ -567,7 +619,6 @@ fn cannonball_tracking(
     mut cannonballs: Query<(Entity, &Transform), With<Cannonball>>,
     mut ships: Query<(Entity, &mut Ship), With<Player>>,
     mut contact_events: EventReader<ContactEvent>,
-    mut debug_text: Query<&mut Text, With<DebugText>>,
 ) {
     for (entity, t) in cannonballs.iter() {
         // cannonball drops into the sea
@@ -578,7 +629,6 @@ fn cannonball_tracking(
     for contact_event in contact_events.iter() {
         match contact_event {
             ContactEvent::Started(h1, h2) => {
-                update_debug_text(&mut debug_text, "HIT!".to_string());
                 if let Ok((cb_entity, _cb_t)) = cannonballs.get_mut(h1.entity()) {
                     commands.entity(cb_entity).despawn_recursive();
                 }
@@ -606,15 +656,24 @@ fn is_to_left_of_player(
     to_player.dot(right) < 0.0
 }
 
+fn hud_handler(
+    mut text_query: Query<&mut Text, With<HUD>>,
+    player: Query<&Ship, With<Player>>,
+    enemy_counter: Res<EnemyCounter>
+) {
+    if let Some(player) = player.iter().next() {
+        if let Some(mut text_box) = text_query.iter_mut().next() {
+            text_box.sections[0].value = format!("health: {}\nenemies left: {}", player.health, ENEMY_COUNT - enemy_counter.dead);
+        }
+    }
+}
+
 // TODO
 // - player laser
-//  - effect
 //  - hit multiple targets
-// - enemies spawning in
 // - boundaries on map
-// - score
 // - sound effects and music
-// - hud and game over screen
+// - game over screen
 // - wheel animation
 
 // -- submit --
