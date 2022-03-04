@@ -1,13 +1,16 @@
 use bevy::{
-    prelude::*, core::FixedTimestep, render::primitives::Sphere, 
+    prelude::*, core::FixedTimestep
 };
 use bevy_prototype_debug_lines::*;
-use bevy_rapier3d::{prelude::*, na::Vector3};
+use bevy_rapier3d::prelude::*;
+
+use std::f32::consts;
 
 const ENEMY_CANNON_RANGE: f32 = 20.0;
 const CANNONBALL_SPEED: f32 = 0.4;
 const CANNON_COOLDOWN: f64 = 5.0;
 const LASER_COOLDOWN: f64 = 1.0;
+const LASER_TIMEOUT: f64 = 0.3;
 
 fn main() {
     App::new()
@@ -66,6 +69,11 @@ fn main() {
             cannonball_tracking
                 .label(Pipeline::CannonballMovement)
         )
+        .add_system(
+            laser_cleanup
+                .label(Pipeline::LaserCleanup)
+                .after(Pipeline::Input)
+        )
         .run();
 }
 
@@ -108,7 +116,8 @@ enum Pipeline {
     Input,
     AI,
     ShipMovement,
-    CannonballMovement
+    CannonballMovement,
+    LaserCleanup
 }
 
 #[derive(Component)]
@@ -132,8 +141,8 @@ impl SteeringWheel {
     fn turn(&mut self, delta_angle: f32) {
         self.angle += delta_angle;
         self.angle = self.angle.clamp(
-            -std::f32::consts::TAU * 3.0, 
-            std::f32::consts::TAU * 3.0
+            -consts::TAU * 3.0, 
+            consts::TAU * 3.0
         );
     }
 }
@@ -144,6 +153,11 @@ struct Cannonball;
 #[derive(Component)]
 struct LaserGun {
     last_fired: f64
+}
+
+#[derive(Component)]
+struct Laser {
+    fired: f64
 }
 
 fn player_setup(
@@ -186,7 +200,7 @@ fn player_setup(
         // Add laser gun
         let laser_t =
             Transform::from_translation(Vec3::new(1.5, 1.2, 0.0))
-                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                .with_rotation(Quat::from_rotation_y(consts::FRAC_PI_2))
                 .with_scale(Vec3::splat(6.0));
         ship.spawn_bundle(PbrBundle {
             transform: laser_t,
@@ -321,10 +335,10 @@ fn player_input_handler(
             let delta_angle = new_angle - prev_input.angle;
             // Handle the cases where the delta crosses the PI boundary at 180 degrees
             let delta_angle = 
-                if delta_angle > std::f32::consts::PI {
-                    delta_angle - std::f32::consts::TAU
-                } else if delta_angle < -std::f32::consts::PI {
-                    delta_angle + std::f32::consts::TAU
+                if delta_angle > consts::PI {
+                    delta_angle - consts::TAU
+                } else if delta_angle < -consts::PI {
+                    delta_angle + consts::TAU
                 } else {
                     delta_angle
                 };
@@ -340,7 +354,7 @@ fn laser_gun_handler(
     mut commands: Commands,
     gamepads: Res<Gamepads>,
     button_axes: Res<Axis<GamepadButton>>,
-    mut lasers: Query<(&mut LaserGun, &GlobalTransform)>,
+    mut lasers: Query<(Entity, &mut LaserGun, &GlobalTransform)>,
     mut player_rb: Query<(
         &mut RigidBodyVelocityComponent,
         &RigidBodyMassPropsComponent
@@ -348,17 +362,18 @@ fn laser_gun_handler(
     query_pipeline: Res<QueryPipeline>,
     collider_query: QueryPipelineColliderComponentsQuery,
     mut lines: ResMut<DebugLines>,
-    time: Res<Time>
+    time: Res<Time>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>
 ) {
     if let Some(gamepad) = gamepads.iter().next() {
-        if let Some((mut laser, laser_t)) = lasers.iter_mut().next() {
-            info!("{:?}", laser_t.translation);
+        if let Some((laser_ent, mut laser_com, laser_t)) = lasers.iter_mut().next() {
             let now = time.seconds_since_startup();
             let right_trigger = button_axes
                 .get(GamepadButton(*gamepad, GamepadButtonType::RightTrigger2))
                 .unwrap();
-            if right_trigger.abs() > 0.01 && now - laser.last_fired > LASER_COOLDOWN {
-                laser.last_fired = now;
+            if right_trigger.abs() > 0.01 && now - laser_com.last_fired > LASER_COOLDOWN {
+                laser_com.last_fired = now;
                 // fire the laser
                 let collider_set = QueryPipelineColliderComponentsSet(&collider_query);
                 let shape = Ball::new(1.0);
@@ -368,11 +383,19 @@ fn laser_gun_handler(
                 let groups = InteractionGroups::all();
                 let filter = None;
 
-                lines.line(
-                    laser_t.translation + laser_t.forward() * -2.0,
-                    laser_t.translation + laser_t.forward() * -2.0 + laser_t.forward() * -50.0,
-                    1.0
-                );
+                commands.entity(laser_ent).with_children(|parent| {
+                    parent.spawn_bundle(PbrBundle {
+                        transform: Transform::from_rotation(Quat::from_rotation_x(consts::FRAC_PI_2)),
+                        mesh: meshes.add(Mesh::from(bevy::prelude::shape::Capsule {
+                            radius: 0.1,
+                            rings: 1,
+                            depth: 49.0,
+                            ..Default::default()
+                        })),
+                        material: materials.add(Color::rgb(1.0, 0.0, 0.0).into()),
+                        ..Default::default()
+                    }).insert(Laser {fired: now});
+                });
 
                 // recoil
                 if let Some((mut rbv, rbmp)) = player_rb.iter_mut().next() {
@@ -388,6 +411,23 @@ fn laser_gun_handler(
                     commands.entity(handle.entity()).despawn_recursive();
                 }
             }
+        }
+    }
+}
+
+fn laser_cleanup(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut lasers: Query<(Entity, &Laser, &mut Transform)>
+) {
+    let now = time.seconds_since_startup();
+    for (ent, laser, mut t) in lasers.iter_mut() {
+        let since_fired = now - laser.fired;
+        if since_fired > LASER_TIMEOUT {
+            commands.entity(ent).despawn_recursive();
+        } else {
+            let girth = (since_fired / LASER_TIMEOUT) as f32;
+            t.scale = Vec3::new(0.0f32.max(t.scale.x * girth), 1.0, 0.0f32.max(t.scale.x * girth));
         }
     }
 }
@@ -467,8 +507,8 @@ fn cannon_ai(
                 // // enemy is in range
                 // t.translation.length() <= ENEMY_CANNON_RANGE &&
                 // // player is either directly to left or right of enemy
-                // angle > std::f32::consts::FRAC_PI_2 - 0.3 &&
-                // angle < std::f32::consts::FRAC_PI_2 + 0.3
+                // angle > consts::FRAC_PI_2 - 0.3 &&
+                // angle < consts::FRAC_PI_2 + 0.3
             {
                 if is_to_left_of_player(player_t, t) {
                     // fire to the left
@@ -568,6 +608,8 @@ fn is_to_left_of_player(
 
 // TODO
 // - player laser
+//  - effect
+//  - hit multiple targets
 // - enemies spawning in
 // - boundaries on map
 // - score
