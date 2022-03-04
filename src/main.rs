@@ -1,12 +1,13 @@
 use bevy::{
-    prelude::*, core::FixedTimestep, 
+    prelude::*, core::FixedTimestep, render::primitives::Sphere, 
 };
 use bevy_prototype_debug_lines::*;
 use bevy_rapier3d::{prelude::*, na::Vector3};
 
 const ENEMY_CANNON_RANGE: f32 = 20.0;
 const CANNONBALL_SPEED: f32 = 0.4;
-const CANNON_COOLDOWN: f64 = 3.0;
+const CANNON_COOLDOWN: f64 = 5.0;
+const LASER_COOLDOWN: f64 = 10.0;
 
 fn main() {
     App::new()
@@ -38,6 +39,10 @@ fn main() {
                 .with_run_criteria(FixedTimestep::step(0.05))
                 .label(Pipeline::Input)
                 .before(Pipeline::ShipMovement)
+        )
+        .add_system(
+            laser_gun_handler
+                .label(Pipeline::Input)
         )
         // // Enemy AI system
         .add_system(
@@ -136,6 +141,11 @@ impl SteeringWheel {
 #[derive(Component)]
 struct Cannonball;
 
+#[derive(Component)]
+struct LaserGun {
+    last_fired: f64
+}
+
 fn player_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>
@@ -173,6 +183,21 @@ fn player_setup(
         ship.spawn_scene(
             asset_server.load("models/pirate/ship_light.glb#Scene0")
         );
+        // Add laser gun
+        let laser_t =
+            Transform::from_translation(Vec3::new(1.5, 1.2, 0.0))
+                .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2))
+                .with_scale(Vec3::splat(6.0));
+        ship.spawn_bundle(PbrBundle {
+            transform: laser_t,
+            ..Default::default()
+        }).with_children(|laser| {
+            // Add laser model
+            laser.spawn_scene(
+                asset_server.load("models/blasterG.glb#Scene0")
+            );
+        })
+        .insert(LaserGun { last_fired: 0.0 });
     })
     .insert(Ship {
         steering_wheel: SteeringWheel {
@@ -273,7 +298,7 @@ struct PreviousInput {
 
 fn player_input_handler(
     gamepads: Res<Gamepads>,
-    // button_inputs: Res<Input<GamepadButton>>,
+    button_inputs: Res<Input<GamepadButton>>,
     // button_axes: Res<Axis<GamepadButton>>,
     axes: Res<Axis<GamepadAxis>>,
     mut prev_input: ResMut<PreviousInput>,
@@ -308,6 +333,53 @@ fn player_input_handler(
             prev_input.angle = new_angle;
         }
         update_debug_text(&mut debug_text, format!("health: {}", player_ship.health))
+    }
+}
+
+fn laser_gun_handler(
+    mut commands: Commands,
+    gamepads: Res<Gamepads>,
+    button_axes: Res<Axis<GamepadButton>>,
+    mut lasers: Query<(&mut LaserGun, &GlobalTransform)>,
+    query_pipeline: Res<QueryPipeline>,
+    collider_query: QueryPipelineColliderComponentsQuery,
+    mut lines: ResMut<DebugLines>,
+    time: Res<Time>
+) {
+    if let Some(gamepad) = gamepads.iter().next() {
+        if let Some((mut laser, laser_t)) = lasers.iter_mut().next() {
+            info!("{:?}", laser_t.translation);
+            let now = time.seconds_since_startup();
+            let right_trigger = button_axes
+                .get(GamepadButton(*gamepad, GamepadButtonType::RightTrigger2))
+                .unwrap();
+            if right_trigger.abs() > 0.01 && now - laser.last_fired > LASER_COOLDOWN {
+                laser.last_fired = now;
+                // fire the laser
+                let collider_set = QueryPipelineColliderComponentsSet(&collider_query);
+                let shape = Ball::new(1.0);
+                let shape_pos = (laser_t.translation + laser_t.forward()*-2.0, Quat::from_rotation_x(0.4)).into();
+                let shape_vel = (laser_t.forward() * -1.0).into();
+                let max_toi = 50.0;
+                let groups = InteractionGroups::all();
+                let filter = None;
+
+                lines.line(
+                    laser_t.translation + laser_t.forward() * -2.0,
+                    laser_t.translation + laser_t.forward() * -2.0 + laser_t.forward() * -50.0,
+                    1.0
+                );
+
+                if let Some((handle, hit)) = query_pipeline.cast_shape(
+                    &collider_set, &shape_pos, &shape_vel, &shape, max_toi, groups, filter
+                ) {
+                    // The first collider hit has the handle `handle`. The `hit` is a
+                    // structure containing details about the hit configuration.
+                    println!("Hit the entity {:?} with the configuration: {:?}", handle.entity(), hit);
+                    commands.entity(handle.entity()).despawn_recursive();
+                }
+            }
+        }
     }
 }
 
