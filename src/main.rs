@@ -7,7 +7,7 @@ use bevy_rapier3d::{prelude::*, na::Vector3};
 const ENEMY_CANNON_RANGE: f32 = 20.0;
 const CANNONBALL_SPEED: f32 = 0.4;
 const CANNON_COOLDOWN: f64 = 5.0;
-const LASER_COOLDOWN: f64 = 10.0;
+const LASER_COOLDOWN: f64 = 1.0;
 
 fn main() {
     App::new()
@@ -341,6 +341,10 @@ fn laser_gun_handler(
     gamepads: Res<Gamepads>,
     button_axes: Res<Axis<GamepadButton>>,
     mut lasers: Query<(&mut LaserGun, &GlobalTransform)>,
+    mut player_rb: Query<(
+        &mut RigidBodyVelocityComponent,
+        &RigidBodyMassPropsComponent
+    ), With<Player>>,
     query_pipeline: Res<QueryPipeline>,
     collider_query: QueryPipelineColliderComponentsQuery,
     mut lines: ResMut<DebugLines>,
@@ -369,6 +373,11 @@ fn laser_gun_handler(
                     laser_t.translation + laser_t.forward() * -2.0 + laser_t.forward() * -50.0,
                     1.0
                 );
+
+                // recoil
+                if let Some((mut rbv, rbmp)) = player_rb.iter_mut().next() {
+                    rbv.apply_impulse(rbmp, (laser_t.forward() * 10000.0).into());
+                }
 
                 if let Some((handle, hit)) = query_pipeline.cast_shape(
                     &collider_set, &shape_pos, &shape_vel, &shape, max_toi, groups, filter
