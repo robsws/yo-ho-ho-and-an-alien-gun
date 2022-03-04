@@ -463,7 +463,9 @@ fn laser_gun_handler(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut enemy_counter: ResMut<EnemyCounter>,
-    enemies: Query<&Ship, Without<Player>>
+    enemies: Query<&Ship, Without<Player>>,
+    asset_server: Res<AssetServer>,
+    audio: Res<Audio>
 ) {
     if let Some(gamepad) = gamepads.iter().next() {
         if let Some((laser_ent, mut laser_com, laser_t)) = lasers.iter_mut().next() {
@@ -482,6 +484,7 @@ fn laser_gun_handler(
                 let groups = InteractionGroups::all();
                 let filter = None;
 
+                // laser effect
                 commands.entity(laser_ent).with_children(|parent| {
                     parent.spawn_bundle(PbrBundle {
                         transform: Transform::from_rotation(Quat::from_rotation_x(consts::FRAC_PI_2)),
@@ -496,6 +499,12 @@ fn laser_gun_handler(
                     }).insert(Laser {fired: now});
                 });
 
+                // audio
+                let low_boom = asset_server.load("sounds/low.ogg");
+                let laser = asset_server.load("sounds/laser.ogg");
+                audio.play(low_boom);
+                audio.play(laser);
+
                 // recoil
                 if let Some((mut rbv, rbmp)) = player_rb.iter_mut().next() {
                     rbv.apply_impulse(rbmp, (laser_t.forward() * 10000.0).into());
@@ -504,9 +513,6 @@ fn laser_gun_handler(
                 if let Some((handle, hit)) = query_pipeline.cast_shape(
                     &collider_set, &shape_pos, &shape_vel, &shape, max_toi, groups, filter
                 ) {
-                    // The first collider hit has the handle `handle`. The `hit` is a
-                    // structure containing details about the hit configuration.
-                    println!("Hit the entity {:?} with the configuration: {:?}", handle.entity(), hit);
                     if let Ok(_) = enemies.get(handle.entity()) {
                         commands.entity(handle.entity()).despawn_recursive();
                         enemy_counter.dead += 1;
@@ -588,7 +594,8 @@ fn cannon_ai(
     mut player_ts: Query<&Transform, With<Player>>,
     mut cannons: Query<(&mut Cannon, &Transform), Without<Player>>,
     asset_server: Res<AssetServer>,
-    time: Res<Time>
+    audio: Res<Audio>,
+    time: Res<Time>,
 ) {
     if let Some(player_t) = player_ts.iter().next() {
         let now = time.seconds_since_startup();
@@ -606,10 +613,10 @@ fn cannon_ai(
             {
                 if is_to_left_of_player(player_t, t) {
                     // fire to the left
-                    fire_cannon(&mut commands, t, t.left(), &asset_server);
+                    fire_cannon(&mut commands, t, t.left(), &asset_server, &audio);
                 } else {
                     // fire to the right
-                    fire_cannon(&mut commands, t, t.right(), &asset_server);
+                    fire_cannon(&mut commands, t, t.right(), &asset_server, &audio);
                 }
                 cannon.last_fired = time.seconds_since_startup();
             }
@@ -622,7 +629,10 @@ fn fire_cannon(
     enemy_transform: &Transform,
     direction: Vec3,
     asset_server: &Res<AssetServer>,
+    audio: &Res<Audio>
 ) {
+    let cannon = asset_server.load("sounds/cannon.ogg");
+    audio.play(cannon);
     let cannonball = asset_server.load("models/pirate/cannonball.glb#Scene0");
     // commands.spawn_bundle(PbrBundle {
     //     transform: t,
@@ -660,6 +670,8 @@ fn cannonball_tracking(
     mut cannonballs: Query<(Entity, &Transform), With<Cannonball>>,
     mut ships: Query<(Entity, &mut Ship), With<Player>>,
     mut contact_events: EventReader<ContactEvent>,
+    asset_server: Res<AssetServer>,
+    audio: Res<Audio>
 ) {
     for (entity, t) in cannonballs.iter() {
         // cannonball drops into the sea
@@ -670,6 +682,8 @@ fn cannonball_tracking(
     for contact_event in contact_events.iter() {
         match contact_event {
             ContactEvent::Started(h1, h2) => {
+                let explosion = asset_server.load("sounds/explosion_1.ogg");
+                audio.play(explosion);
                 if let Ok((cb_entity, _cb_t)) = cannonballs.get_mut(h1.entity()) {
                     commands.entity(cb_entity).despawn_recursive();
                 }
@@ -721,6 +735,8 @@ fn game_over_checker(
     enemy_counter: Res<EnemyCounter>,
     mut state: ResMut<State<GameState>>,
     mut text_query: Query<&mut Text, With<GameOverText>>,
+    asset_server: Res<AssetServer>,
+    audio: Res<Audio>
 ) {
     let mut gameover = false;
     if let Some((ent, ship, gt)) = player.iter().next() {
@@ -730,6 +746,8 @@ fn game_over_checker(
             if let Some(mut text) = text_query.iter_mut().next() {
                 text.sections[0].value = "You got lost at sea.\nPress left trigger to try again.".to_string()
             }
+            let explosion = asset_server.load("sounds/explosion_2.ogg");
+            audio.play(explosion);
             commands.entity(ent).despawn_recursive();
         }
         // if player health is out
@@ -738,6 +756,8 @@ fn game_over_checker(
             if let Some(mut text) = text_query.iter_mut().next() {
                 text.sections[0].value = "Your ship got destroyed.\nPress left trigger to try again.".to_string()
             }
+            let explosion = asset_server.load("sounds/explosion_2.ogg");
+            audio.play(explosion);
             commands.entity(ent).despawn_recursive();
         }
         // if player defeated all enemies
