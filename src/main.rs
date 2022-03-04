@@ -6,16 +6,14 @@ use bevy_rapier3d::prelude::*;
 
 use std::f32::consts;
 
-const ENEMY_CANNON_RANGE: f32 = 20.0;
-const CANNONBALL_SPEED: f32 = 0.4;
 const CANNON_COOLDOWN: f64 = 5.0;
 const LASER_COOLDOWN: f64 = 1.0;
 const LASER_TIMEOUT: f64 = 0.3;
-const SPAWN_COOLDOWN: f64 = 5.0;
 const ENEMY_COUNT: i32 = 10;
 
 fn main() {
     App::new()
+        .add_state(GameState::Running)
         .insert_resource(Msaa { samples: 4 })
         .insert_resource(WindowDescriptor {
             title: "Yo ho ho and an extra-terrestrial gun!".to_string(),
@@ -35,70 +33,90 @@ fn main() {
         .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
         .add_plugin(RapierRenderPlugin)
         .add_startup_system(camera_setup)
-        .add_startup_system(player_setup)
-        .add_startup_system(lighting_setup)
-        .add_startup_system(hud_setup)
-        .add_startup_system(spawner_setup)
-        // Player input system
-        .add_system(
-            player_input_handler
-                .with_run_criteria(FixedTimestep::step(0.05))
-                .label(Pipeline::Input)
-                .before(Pipeline::ShipMovement)
+        .add_system_set(
+            SystemSet::on_enter(GameState::Running)
+                .with_system(player_setup)
+                .with_system(lighting_setup)
+                .with_system(hud_setup)
+                .with_system(spawner_setup)
         )
-        .add_system(
-            laser_gun_handler
-                .label(Pipeline::Input)
+        .add_system_set(
+            SystemSet::new()
+                .with_system(
+                    player_input_handler
+                        .with_run_criteria(FixedTimestep::step(0.05))
+                        .label(Pipeline::Input)
+                        .before(Pipeline::ShipMovement)
+                )
+                .with_system(
+                    laser_gun_handler
+                        .label(Pipeline::Input)
+                )
+                .with_system(
+                    enemy_spawner
+                        .label(Pipeline::Spawner)
+                )
+                // Enemy AI system
+                .with_system(
+                    enemy_movement_ai
+                        .with_run_criteria(FixedTimestep::step(0.05))
+                        .label(Pipeline::AI)
+                        .before(Pipeline::ShipMovement)
+                )
+                .with_system(
+                    cannon_ai
+                        .with_run_criteria(FixedTimestep::step(0.05))
+                        .label(Pipeline::AI)
+                        .before(Pipeline::CannonballMovement)
+                )
+                .with_system(
+                    ship_movement
+                        .label(Pipeline::ShipMovement)
+                )
+                .with_system(
+                    cannonball_tracking
+                        .label(Pipeline::CannonballMovement)
+                )
+                .with_system(
+                    laser_cleanup
+                        .label(Pipeline::LaserCleanup)
+                        .after(Pipeline::Input)
+                )
+                .with_system(
+                    hud_handler
+                        .label(Pipeline::HUD)
+                        .after(Pipeline::ShipMovement)
+                        .after(Pipeline::Input)
+                        .after(Pipeline::CannonballMovement)
+                        .after(Pipeline::AI)
+                )
         )
-        .add_system(
-            enemy_spawner
-                .label(Pipeline::Spawner)
-        )
-        // // Enemy AI system
-        .add_system(
-            enemy_movement_ai
-                .with_run_criteria(FixedTimestep::step(0.05))
-                .label(Pipeline::AI)
-                .before(Pipeline::ShipMovement)
-        )
-        .add_system(
-            cannon_ai
-                .with_run_criteria(FixedTimestep::step(0.05))
-                .label(Pipeline::AI)
-                .before(Pipeline::CannonballMovement)
-        )
-        // // Player movement system
-        .add_system(
-            ship_movement
-                .label(Pipeline::ShipMovement)
-        )
-        .add_system(
-            cannonball_tracking
-                .label(Pipeline::CannonballMovement)
-        )
-        .add_system(
-            laser_cleanup
-                .label(Pipeline::LaserCleanup)
-                .after(Pipeline::Input)
-        )
-        .add_system(
-            hud_handler
-                .label(Pipeline::HUD)
-                .after(Pipeline::ShipMovement)
-                .after(Pipeline::Input)
-                .after(Pipeline::CannonballMovement)
-                .after(Pipeline::AI)
-        )
+        .add_system_set(SystemSet::on_update(GameState::Running).with_system(game_over_checker.after(Pipeline::HUD)))
+        .add_system_set(SystemSet::on_update(GameState::GameOver).with_system(game_over))
+        .add_system_set(SystemSet::on_exit(GameState::GameOver).with_system(teardown))
+        .add_system(bevy::input::system::exit_on_esc_system)
         .run();
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+enum GameState {
+    Running,
+    GameOver
 }
 
 #[derive(Component)]
 struct HUD;
 
+#[derive(Component)]
+struct GameOverText;
+
 fn hud_setup(
     mut commands: Commands,
-    asset_server: Res<AssetServer>
+    asset_server: Res<AssetServer>,
+    mut enemy_counter: ResMut<EnemyCounter>
 ) {
+    enemy_counter.to_spawn = ENEMY_COUNT;
+    enemy_counter.dead = 0;
     let font = asset_server.load("fonts/Arial Unicode.ttf");
     commands.spawn_bundle(UiCameraBundle::default());
     commands.spawn_bundle(TextBundle {
@@ -113,7 +131,7 @@ fn hud_setup(
             ..Default::default()
         },
         text: Text::with_section(
-            "Some debug text",
+            "",
             TextStyle {
                 font: font.clone(),
                 font_size: 50.0,
@@ -124,6 +142,28 @@ fn hud_setup(
         ..Default::default()
     })
     .insert(HUD);
+    commands.spawn_bundle(TextBundle {
+        style: Style {
+            align_self: AlignSelf::FlexEnd,
+            position_type: PositionType::Absolute,
+            position: Rect {
+                top: Val::Px(500.0),
+                left: Val::Px(100.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        text: Text::with_section(
+            "",
+            TextStyle {
+                font: font.clone(),
+                font_size: 70.0,
+                color: Color::WHITE,
+            },
+            Default::default(),
+        ),
+        ..Default::default()
+    }).insert(GameOverText);
 }
 
 #[derive(SystemLabel, Debug, Hash, PartialEq, Eq, Clone)]
@@ -252,8 +292,8 @@ fn player_setup(
 fn spawner_setup(
     mut commands: Commands
 ) {
-    for x in [-40.0, 40.0] {
-        for z in [-40.0, 40.0] {
+    for x in [-40.0, 30.0] {
+        for z in [-30.0, 30.0] {
             commands.spawn_bundle(PbrBundle {
                 transform: Transform::from_translation(Vec3::new(x, 0.0, z)),
                 ..Default::default()
@@ -333,7 +373,7 @@ fn camera_setup(
 ) {
     let mut camera = OrthographicCameraBundle::new_3d();
     camera.orthographic_projection.scale = 20.0;
-    camera.transform = Transform::from_xyz(60.0, 60.0, 60.0).looking_at(Vec3::ZERO, Vec3::Y);
+    camera.transform = Transform::from_xyz(60.0, 60.0, 0.0).looking_at(Vec3::ZERO, Vec3::Y);
     commands.spawn_bundle(camera);
 }
 
@@ -359,6 +399,7 @@ fn lighting_setup(
             shadows_enabled: true,
             ..Default::default()
         },
+        transform: Transform::from_rotation(Quat::from_rotation_y(consts::FRAC_PI_2)),
         ..Default::default()
     });
 }
@@ -668,12 +709,69 @@ fn hud_handler(
     }
 }
 
+fn teardown(mut commands: Commands, entities: Query<Entity, Without<Camera>>) {
+    for entity in entities.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+}
+
+fn game_over_checker(
+    mut commands: Commands,
+    player: Query<(Entity, &Ship, &GlobalTransform), With<Player>>,
+    enemy_counter: Res<EnemyCounter>,
+    mut state: ResMut<State<GameState>>,
+    mut text_query: Query<&mut Text, With<GameOverText>>,
+) {
+    let mut gameover = false;
+    if let Some((ent, ship, gt)) = player.iter().next() {
+        // if player out of bounds
+        if gt.translation.x < -30.0 || gt.translation.x > 40.0 || gt.translation.z > 30.0 || gt.translation.z < -30.0 {
+            gameover = true;
+            if let Some(mut text) = text_query.iter_mut().next() {
+                text.sections[0].value = "You got lost at sea.\nPress left trigger to try again.".to_string()
+            }
+            commands.entity(ent).despawn_recursive();
+        }
+        // if player health is out
+        if ship.health <= 0 {
+            gameover = true;
+            if let Some(mut text) = text_query.iter_mut().next() {
+                text.sections[0].value = "Your ship got destroyed.\nPress left trigger to try again.".to_string()
+            }
+            commands.entity(ent).despawn_recursive();
+        }
+        // if player defeated all enemies
+        if enemy_counter.dead == ENEMY_COUNT {
+            gameover = true;
+            if let Some(mut text) = text_query.iter_mut().next() {
+                text.sections[0].value = "You made it out alive! Well done!\nPress left trigger to play again.".to_string()
+            }
+        }
+    }
+    if gameover {
+        match state.set(GameState::GameOver) {
+            _ => ()
+        };
+    }
+}
+
+fn game_over(
+    mut state: ResMut<State<GameState>>,
+    button_axes: Res<Axis<GamepadButton>>,
+    gamepads: Res<Gamepads>,
+) {
+    for gamepad in gamepads.iter() {
+        let right_trigger = button_axes
+            .get(GamepadButton(*gamepad, GamepadButtonType::LeftTrigger2))
+            .unwrap();
+        if right_trigger.abs() > 0.01 {
+            state.set(GameState::Running).unwrap();
+        }
+    }
+}
+
 // TODO
-// - player laser
-//  - hit multiple targets
-// - boundaries on map
 // - sound effects and music
-// - game over screen
 // - wheel animation
 
 // -- submit --
