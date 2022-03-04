@@ -58,7 +58,7 @@ fn main() {
                 .label(Pipeline::ShipMovement)
         )
         .add_system(
-            cannonball_movement
+            cannonball_tracking
                 .label(Pipeline::CannonballMovement)
         )
         .run();
@@ -112,6 +112,7 @@ struct Player;
 #[derive(Component)]
 struct Ship {
     steering_wheel: SteeringWheel,
+    health: u32
 }
 #[derive(Component)]
 struct Cannon {
@@ -158,8 +159,9 @@ fn player_setup(
     .insert_bundle(ColliderBundle {
         shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
         collider_type: ColliderType::Solid.into(),
-        material: ColliderMaterial { friction: 0.7, restitution: 0.3, ..Default::default() }.into(),
+        material: ColliderMaterial { friction: 2.0, restitution: 0.1, ..Default::default() }.into(),
         mass_properties: ColliderMassProps::Density(4.0).into(),
+        flags: ActiveEvents::CONTACT_EVENTS.into(),
         ..Default::default()
     })
     .insert(Transform::default())
@@ -174,8 +176,9 @@ fn player_setup(
     })
     .insert(Ship {
         steering_wheel: SteeringWheel {
-            angle: 0.0
+            angle: 0.0,
         },
+        health: 100
     })
     .insert(Player);
 }
@@ -187,7 +190,7 @@ fn enemy_setup(
 ) {
     // Create enemies
     commands.spawn_bundle(RigidBodyBundle {
-        position: Vec3::new(20.0, 0.0, 15.0).into(),
+        position: Vec3::new(-20.0, 0.0, -15.0).into(),
         forces: RigidBodyForces {
             gravity_scale: 0.0,
             // torque: Vec3::new(140.0, 80.0, 20.0).into(),
@@ -204,7 +207,7 @@ fn enemy_setup(
     .insert_bundle(ColliderBundle {
         shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
         collider_type: ColliderType::Solid.into(),
-        material: ColliderMaterial { friction: 0.7, restitution: 0.3, ..Default::default() }.into(),
+        material: ColliderMaterial { friction: 2.0, restitution: 0.9, ..Default::default() }.into(),
         mass_properties: ColliderMassProps::Density(4.0).into(),
         ..Default::default()
     })
@@ -222,6 +225,7 @@ fn enemy_setup(
         steering_wheel: SteeringWheel {
             angle: 0.0
         },
+        health: 20
     }).insert(Cannon {
         last_fired: 0.0
     });
@@ -273,7 +277,9 @@ fn player_input_handler(
     // button_axes: Res<Axis<GamepadButton>>,
     axes: Res<Axis<GamepadAxis>>,
     mut prev_input: ResMut<PreviousInput>,
-    mut player_ships: Query<&mut Ship, With<Player>>
+    mut player_ships: Query<&mut Ship, With<Player>>,
+    mut debug_text: Query<&mut Text, With<DebugText>>,
+
 ) {
     if let Some(mut player_ship) = player_ships.iter_mut().next() {
         if let Some(gamepad) = gamepads.iter().next() {
@@ -301,6 +307,7 @@ fn player_input_handler(
             player_ship.steering_wheel.turn(delta_angle);
             prev_input.angle = new_angle;
         }
+        update_debug_text(&mut debug_text, format!("health: {}", player_ship.health))
     }
 }
 
@@ -351,11 +358,11 @@ fn enemy_movement_ai(
             } else {
                 enemy_ship.steering_wheel.angle = angle_to_player * -6.0;
             }
-            lines.line(
-                t.translation,
-                t.translation + t.forward() * 10.0,
-                0.0
-            );
+            // lines.line(
+            //     t.translation,
+            //     t.translation + t.forward() * 10.0,
+            //     0.0
+            // );
         }
     }
 }
@@ -375,12 +382,12 @@ fn cannon_ai(
             let angle = t.forward().angle_between(to_player);
             if
                 // cannon is off cooldown
-                now - cannon.last_fired > CANNON_COOLDOWN &&
-                // enemy is in range
-                t.translation.length() <= ENEMY_CANNON_RANGE &&
-                // player is either directly to left or right of enemy
-                angle > std::f32::consts::FRAC_PI_2 - 0.1 &&
-                angle < std::f32::consts::FRAC_PI_2 + 0.1
+                now - cannon.last_fired > CANNON_COOLDOWN // &&
+                // // enemy is in range
+                // t.translation.length() <= ENEMY_CANNON_RANGE &&
+                // // player is either directly to left or right of enemy
+                // angle > std::f32::consts::FRAC_PI_2 - 0.3 &&
+                // angle < std::f32::consts::FRAC_PI_2 + 0.3
             {
                 if is_to_left_of_player(player_t, t) {
                     // fire to the left
@@ -403,32 +410,69 @@ fn fire_cannon(
     debug_text: &mut Query<&mut Text, With<DebugText>>,
 ) {
     let cannonball = asset_server.load("models/pirate/cannonball.glb#Scene0");
-    let mut t = enemy_transform.clone();
-    t.look_at(
-        t.translation + direction,
-        t.up()
-    );
-    t.apply_non_uniform_scale(Vec3::splat(2.0));
-    t.translation += t.up();
-    commands.spawn_bundle(PbrBundle {
-        transform: t,
+    // commands.spawn_bundle(PbrBundle {
+    //     transform: t,
+    //     ..Default::default()
+    commands.spawn_bundle(RigidBodyBundle {
+        position: (enemy_transform.translation + direction * 2.0 + enemy_transform.up() * 2.0).into(),
+        velocity: RigidBodyVelocity { 
+            linvel: (direction * 5.0).into(),
+            ..Default::default()
+        }.into(),
+        forces: RigidBodyForces {
+            gravity_scale: 0.1,
+            ..Default::default()
+        }.into(),
         ..Default::default()
-    }).with_children(|parent| {
+    })
+    .insert_bundle(ColliderBundle {
+        shape: ColliderShape::ball(0.5).into(),
+        collider_type: ColliderType::Solid.into(),
+        material: ColliderMaterial { friction: 0.7, restitution: 0.1, ..Default::default() }.into(),
+        mass_properties: ColliderMassProps::Density(100.0).into(),
+        ..Default::default()
+    })
+    .with_children(|parent| {
         parent.spawn_scene(cannonball);
     })
+    .insert(Transform::default())
+    .insert(RigidBodyPositionSync::Discrete)
+    .insert(RigidBodyTypeComponent::from(RigidBodyType::Dynamic))
     .insert(Cannonball);
 }
 
-fn cannonball_movement(
-    cannonball_entities: Query<Entity, With<Cannonball>>,
-    mut cannonball_transforms: Query<(&mut Transform, &Cannonball)>
+fn cannonball_tracking(
+    mut commands: Commands,
+    mut cannonballs: Query<(Entity, &Transform), With<Cannonball>>,
+    mut ships: Query<(Entity, &mut Ship), With<Player>>,
+    mut contact_events: EventReader<ContactEvent>,
+    mut debug_text: Query<&mut Text, With<DebugText>>,
 ) {
-    let mut i = 0;
-    for entity in cannonball_entities.iter() {
-        let (mut transform, cannonball) = cannonball_transforms.get_mut(entity).unwrap();
-        let forward = transform.forward();
-        transform.translation += forward * CANNONBALL_SPEED;
-        i += 1;
+    for (entity, t) in cannonballs.iter() {
+        // cannonball drops into the sea
+        if t.translation.y < 0.0 {
+            commands.entity(entity).despawn_recursive();
+        }
+    }
+    for contact_event in contact_events.iter() {
+        match contact_event {
+            ContactEvent::Started(h1, h2) => {
+                update_debug_text(&mut debug_text, "HIT!".to_string());
+                if let Ok((cb_entity, _cb_t)) = cannonballs.get_mut(h1.entity()) {
+                    commands.entity(cb_entity).despawn_recursive();
+                }
+                else if let Ok((_ship_ent, mut ship)) = ships.get_mut(h1.entity()) {
+                    ship.health -= 10;
+                }
+                if let Ok((cb_entity, _cb_t)) = cannonballs.get_mut(h2.entity()) {
+                    commands.entity(cb_entity).despawn_recursive();
+                }
+                else if let Ok((_ship_ent, mut ship)) = ships.get_mut(h2.entity()) {
+                    ship.health -= 10;
+                }
+            },
+            _ => ()
+        };
     }
 }
 
@@ -440,3 +484,17 @@ fn is_to_left_of_player(
     let to_player = player_t.translation - other_t.translation;
     to_player.dot(right) < 0.0
 }
+
+// TODO
+// - player laser
+// - enemies spawning in
+// - boundaries on map
+// - score
+// - sound effects and music
+// - hud and game over screen
+// - wheel animation
+
+// -- submit --
+
+// - simple visual effects
+// - splash screen
