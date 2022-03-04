@@ -2,9 +2,10 @@ use bevy::{
     prelude::*, core::FixedTimestep, 
 };
 use bevy_prototype_debug_lines::*;
+use bevy_rapier3d::{prelude::*, na::Vector3};
 
 const ENEMY_CANNON_RANGE: f32 = 20.0;
-const CANNONBALL_SPEED: f32 = 0.2;
+const CANNONBALL_SPEED: f32 = 0.4;
 const CANNON_COOLDOWN: f64 = 3.0;
 
 fn main() {
@@ -24,51 +25,47 @@ fn main() {
         .insert_resource(PreviousInput::default())
         .add_plugins(DefaultPlugins)
         .add_plugin(DebugLinesPlugin::default())
+        .add_plugin(RapierPhysicsPlugin::<NoUserData>::default())
+        .add_plugin(RapierRenderPlugin)
         .add_startup_system(camera_setup)
         .add_startup_system(player_setup)
         .add_startup_system(lighting_setup)
         .add_startup_system(debug_setup)
-        .add_startup_system(world_setup)
+        .add_startup_system(enemy_setup)
         // Player input system
         .add_system(
             player_input_handler
                 .with_run_criteria(FixedTimestep::step(0.05))
-                .label(PlayerMovement::Input)
-                .before(PlayerMovement::Movement)
+                .label(Pipeline::Input)
+                .before(Pipeline::ShipMovement)
         )
-        // Enemy AI system
+        // // Enemy AI system
         .add_system(
             enemy_movement_ai
                 .with_run_criteria(FixedTimestep::step(0.05))
-                .label(EnemyMovement::AI)
-                .before(EnemyMovement::Movement)
+                .label(Pipeline::AI)
+                .before(Pipeline::ShipMovement)
         )
         .add_system(
             cannon_ai
                 .with_run_criteria(FixedTimestep::step(0.05))
-                .label(CannonballMovement::AI)
-                .before(CannonballMovement::Movement)
+                .label(Pipeline::AI)
+                .before(Pipeline::CannonballMovement)
         )
-        // Player movement system
+        // // Player movement system
         .add_system(
-            player_movement
-                .label(PlayerMovement::Movement)
+            ship_movement
+                .label(Pipeline::ShipMovement)
         )
-        // .add_system(
-        //     enemy_movement
-        //         .label(EnemyMovement::Movement)
-        // )
         .add_system(
             cannonball_movement
-                .label(CannonballMovement::Movement)
+                .label(Pipeline::CannonballMovement)
         )
         .run();
 }
 
 #[derive(Component)]
-struct DebugText {
-    message: String
-}
+struct DebugText;
 
 fn debug_setup(
     mut commands: Commands,
@@ -98,25 +95,15 @@ fn debug_setup(
         ),
         ..Default::default()
     })
-    .insert(DebugText { message: "debug".to_string() });
+    .insert(DebugText);
 }
 
 #[derive(SystemLabel, Debug, Hash, PartialEq, Eq, Clone)]
-enum PlayerMovement {
+enum Pipeline {
     Input,
-    Movement
-}
-
-#[derive(SystemLabel, Debug, Hash, PartialEq, Eq, Clone)]
-enum EnemyMovement{
     AI,
-    Movement
-}
-
-#[derive(SystemLabel, Debug, Hash, PartialEq, Eq, Clone)]
-enum CannonballMovement{
-    AI,
-    Movement
+    ShipMovement,
+    CannonballMovement
 }
 
 #[derive(Component)]
@@ -125,9 +112,7 @@ struct Player;
 #[derive(Component)]
 struct Ship {
     steering_wheel: SteeringWheel,
-    speed: f32,
 }
-
 #[derive(Component)]
 struct Cannon {
     last_fired: f64
@@ -155,9 +140,34 @@ fn player_setup(
     asset_server: Res<AssetServer>
 ) {
     // Create the player ship
-    commands.spawn_bundle(PbrBundle {
+    commands.spawn_bundle(RigidBodyBundle {
+        position: Vec3::new(0.0, 0.0, 0.0).into(),
+        forces: RigidBodyForces {
+            gravity_scale: 0.0,
+            // torque: Vec3::new(140.0, 80.0, 20.0).into(),
+            ..Default::default()
+        }.into(),
+        damping: RigidBodyDamping { linear_damping: 3.0, angular_damping: 3.0 }.into(),
+        mass_properties: (
+            RigidBodyMassPropsFlags::TRANSLATION_LOCKED_Y |
+            RigidBodyMassPropsFlags::ROTATION_LOCKED_X |
+            RigidBodyMassPropsFlags::ROTATION_LOCKED_Z
+        ).into(),
         ..Default::default()
-    }).with_children(|ship| {
+    })
+    .insert_bundle(ColliderBundle {
+        shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
+        collider_type: ColliderType::Solid.into(),
+        material: ColliderMaterial { friction: 0.7, restitution: 0.3, ..Default::default() }.into(),
+        mass_properties: ColliderMassProps::Density(4.0).into(),
+        ..Default::default()
+    })
+    .insert(Transform::default())
+    .insert(RigidBodyPositionSync::Discrete)
+    .insert(RigidBodyTypeComponent::from(RigidBodyType::Dynamic))
+    // .insert(ColliderDebugRender::with_id(1))
+    .with_children(|ship| {
+        // Add ship model
         ship.spawn_scene(
             asset_server.load("models/pirate/ship_light.glb#Scene0")
         );
@@ -166,9 +176,55 @@ fn player_setup(
         steering_wheel: SteeringWheel {
             angle: 0.0
         },
-        speed: 0.1
     })
-    .insert(Player {});
+    .insert(Player);
+}
+
+
+fn enemy_setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>
+) {
+    // Create enemies
+    commands.spawn_bundle(RigidBodyBundle {
+        position: Vec3::new(20.0, 0.0, 15.0).into(),
+        forces: RigidBodyForces {
+            gravity_scale: 0.0,
+            // torque: Vec3::new(140.0, 80.0, 20.0).into(),
+            ..Default::default()
+        }.into(),
+        damping: RigidBodyDamping { linear_damping: 3.0, angular_damping: 3.0 }.into(),
+        mass_properties: (
+            RigidBodyMassPropsFlags::TRANSLATION_LOCKED_Y |
+            RigidBodyMassPropsFlags::ROTATION_LOCKED_X |
+            RigidBodyMassPropsFlags::ROTATION_LOCKED_Z
+        ).into(),
+        ..Default::default()
+    })
+    .insert_bundle(ColliderBundle {
+        shape: ColliderShape::cuboid(1.8, 2.0, 4.0).into(),
+        collider_type: ColliderType::Solid.into(),
+        material: ColliderMaterial { friction: 0.7, restitution: 0.3, ..Default::default() }.into(),
+        mass_properties: ColliderMassProps::Density(4.0).into(),
+        ..Default::default()
+    })
+    .insert(Transform::default())
+    .insert(RigidBodyPositionSync::Discrete)
+    .insert(RigidBodyTypeComponent::from(RigidBodyType::Dynamic))
+    // .insert(ColliderDebugRender::with_id(1))
+    .with_children(|ship| {
+        // Add ship model
+        ship.spawn_scene(
+            asset_server.load("models/pirate/ship_dark.glb#Scene0")
+        );
+    })
+    .insert(Ship {
+        steering_wheel: SteeringWheel {
+            angle: 0.0
+        },
+    }).insert(Cannon {
+        last_fired: 0.0
+    });
 }
 
 fn camera_setup(
@@ -204,50 +260,6 @@ fn lighting_setup(
         },
         ..Default::default()
     });
-}
-
-#[derive(Component)]
-struct World;
-
-fn world_setup(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>
-) {
-    // Load the cannonball
-    let _cannonball: Handle<Scene> =
-        asset_server.load("models/pirate/cannonball.glb#Scene0");
-    // Load the world
-    commands.spawn_bundle(PbrBundle {
-        ..Default::default()
-    }).with_children(|world| {
-        // Make the scenery
-        world.spawn_bundle(PbrBundle {
-            transform: Transform::from_translation(Vec3::new(5.0, 0.0, 5.0)),
-            ..Default::default()
-        }).with_children(|parent| {
-            parent.spawn_scene(asset_server.load("models/nature/cliff_rock.glb#Scene0"));
-        });
-        world.spawn_bundle(PbrBundle {
-            transform: Transform::from_translation(Vec3::new(-5.0, 0.0, 0.0)),
-            ..Default::default()
-        }).with_children(|parent| {
-            parent.spawn_scene(asset_server.load("models/nature/cliff_rock.glb#Scene0"));
-        });
-        // Create enemies
-        world.spawn_bundle(PbrBundle {
-            transform: Transform::from_translation(Vec3::new(-10.0, 0.0, 0.0)),
-            ..Default::default()
-        }).with_children(|parent| {
-            parent.spawn_scene(
-                asset_server.load("models/pirate/ship_dark.glb#Scene0")
-            );
-        }).insert(Ship {
-            steering_wheel: SteeringWheel { angle: 0.0 },
-            speed: 0.0
-        }).insert(Cannon {
-            last_fired: 0.0
-        });
-    }).insert(World);
 }
 
 #[derive(Default)]
@@ -292,33 +304,25 @@ fn player_input_handler(
     }
 }
 
-fn player_movement(
-    mut player_ships: Query<(&Ship, &mut Transform), With<Player>>,
-    mut world_transforms: Query<&mut Transform, (With<World>, Without<Ship>)>,
-    mut _debug_text: Query<&mut Text, With<DebugText>>,
+fn ship_movement(
+    mut ships: Query<(
+        &Ship,
+        &Transform,
+        &mut RigidBodyForcesComponent,
+        &mut RigidBodyMassPropsComponent
+    )>,
+    mut _debug_text: Query<&mut Text, With<DebugText>>
 ) {
-    for (ship, mut t) in player_ships.iter_mut() {
-        let rotation_angle = ship.steering_wheel.angle / 900.0;
-        t.rotate(Quat::from_rotation_y(rotation_angle));
-        let backward = t.local_z();
-        if let Some(mut wt) = world_transforms.iter_mut().next() {
-            wt.translation += backward * ship.speed;
-        }
+    for (ship, t, mut rbf, mut rbmp) in ships.iter_mut() {
+        let centre_of_rotation = t.translation + t.left() * (ship.steering_wheel.angle / 4.0);
+        let lever_arm_vector = t.translation - centre_of_rotation;
+        let torque = lever_arm_vector.cross(t.forward()) * 1000.0;
+        rbmp.local_mprops.local_com = Vec3::new(0.0, 0.0, 1.0).into();
+        rbf.force = (t.forward()*3000.0).into();
+        rbf.torque = torque.into();
     }
 }
 
-fn enemy_movement(
-    mut enemy_ships: Query<(&Ship, &mut Transform), Without<Player>>,
-    mut _debug_text: Query<&mut Text, With<DebugText>>
-) {
-    for (ship, mut t) in enemy_ships.iter_mut() {
-        let rotation_angle = ship.steering_wheel.angle / 900.0;
-        t.rotate(Quat::from_rotation_y(rotation_angle));
-        let forward = t.forward();
-        // update_debug_text(&mut debug_text, format!("{:?}", forward));
-        t.translation += forward * ship.speed;
-    }
-}
 
 fn update_debug_text(
     text_query: &mut Query<&mut Text, With<DebugText>>,
@@ -329,66 +333,61 @@ fn update_debug_text(
     }
 }
 
-fn enemy_debug(
-    mut enemy_ships: Query<(&mut Ship, &GlobalTransform), Without<Player>>,
-    time: Res<Time>,
-) {
-    for (mut enemy_ship, enemy_transform) in enemy_ships.iter_mut() {
-        enemy_ship.steering_wheel.angle = time.seconds_since_startup().sin() as f32 * 18.0;
-    }
-}
-
 fn enemy_movement_ai(
     mut commands: Commands,
-    mut enemy_ships: Query<(&mut Ship, &GlobalTransform), Without<Player>>,
+    mut enemy_ships: Query<(&mut Ship, &Transform), Without<Player>>,
+    mut player_ts: Query<&Transform, With<Player>>,
     mut debug_text: Query<&mut Text, With<DebugText>>,
     mut lines: ResMut<DebugLines>
 ) {
     // Try and move into range of the player
-    let commands_ref = &mut commands;
-    for (mut enemy_ship, gt) in enemy_ships.iter_mut() {
-        let angle_to_player =
-            gt.forward().angle_between(-gt.translation);
-        if is_to_left_of_player(gt) {
-            enemy_ship.steering_wheel.angle = angle_to_player * 6.0;
-        } else {
-            enemy_ship.steering_wheel.angle = angle_to_player * -6.0;
+    if let Some(player_t) = player_ts.iter().next() {
+        for (mut enemy_ship, t) in enemy_ships.iter_mut() {
+            let vec_to_player = player_t.translation - t.translation;
+            let angle_to_player =
+                t.forward().angle_between(vec_to_player);
+            if is_to_left_of_player(player_t, t) {
+                enemy_ship.steering_wheel.angle = angle_to_player * 6.0;
+            } else {
+                enemy_ship.steering_wheel.angle = angle_to_player * -6.0;
+            }
+            lines.line(
+                t.translation,
+                t.translation + t.forward() * 10.0,
+                0.0
+            );
         }
-        lines.line(
-            gt.translation, 
-            gt.translation + gt.forward() * 10.0,
-            0.0
-        );
     }
 }
 
 fn cannon_ai(
     mut commands: Commands,
-    worlds: Query<Entity, With<World>>,
-    mut cannons: Query<(&mut Cannon, &GlobalTransform, &Transform), Without<Player>>,
+    mut player_ts: Query<&Transform, With<Player>>,
+    mut cannons: Query<(&mut Cannon, &Transform), Without<Player>>,
     asset_server: Res<AssetServer>,
     mut debug_text: Query<&mut Text, With<DebugText>>,
     time: Res<Time>
 ) {
-    if let Some(world) = worlds.iter().next() {
+    if let Some(player_t) = player_ts.iter().next() {
         let now = time.seconds_since_startup();
-        for (mut cannon, gt, t) in cannons.iter_mut() {
-            let angle = gt.forward().angle_between(-gt.translation);
+        for (mut cannon, t) in cannons.iter_mut() {
+            let to_player = player_t.translation - t.translation;
+            let angle = t.forward().angle_between(to_player);
             if
                 // cannon is off cooldown
                 now - cannon.last_fired > CANNON_COOLDOWN &&
                 // enemy is in range
-                gt.translation.length() <= ENEMY_CANNON_RANGE &&
+                t.translation.length() <= ENEMY_CANNON_RANGE &&
                 // player is either directly to left or right of enemy
                 angle > std::f32::consts::FRAC_PI_2 - 0.1 &&
                 angle < std::f32::consts::FRAC_PI_2 + 0.1
             {
-                if is_to_left_of_player(gt) {
+                if is_to_left_of_player(player_t, t) {
                     // fire to the left
-                    fire_cannon(&mut commands, world, t, t.left(), &asset_server, &mut debug_text);
+                    fire_cannon(&mut commands, t, t.left(), &asset_server, &mut debug_text);
                 } else {
                     // fire to the right
-                    fire_cannon(&mut commands, world, t, t.right(), &asset_server, &mut debug_text);
+                    fire_cannon(&mut commands, t, t.right(), &asset_server, &mut debug_text);
                 }
                 cannon.last_fired = time.seconds_since_startup();
             }
@@ -398,28 +397,26 @@ fn cannon_ai(
 
 fn fire_cannon(
     commands: &mut Commands,
-    world: Entity,
     enemy_transform: &Transform,
     direction: Vec3,
     asset_server: &Res<AssetServer>,
     debug_text: &mut Query<&mut Text, With<DebugText>>,
 ) {
     let cannonball = asset_server.load("models/pirate/cannonball.glb#Scene0");
-    commands.entity(world).with_children(|parent| {
-        let mut cannonball_transform = enemy_transform.clone();
-        cannonball_transform.look_at(
-            cannonball_transform.translation + direction,
-            cannonball_transform.up()
-        );
-        cannonball_transform.apply_non_uniform_scale(Vec3::splat(2.0));
-        parent.spawn_bundle(PbrBundle {
-            transform: cannonball_transform,
-            ..Default::default()
-        }).with_children(|parent| {
-            parent.spawn_scene(cannonball);
-        })
-        .insert(Cannonball);
-    });
+    let mut t = enemy_transform.clone();
+    t.look_at(
+        t.translation + direction,
+        t.up()
+    );
+    t.apply_non_uniform_scale(Vec3::splat(2.0));
+    t.translation += t.up();
+    commands.spawn_bundle(PbrBundle {
+        transform: t,
+        ..Default::default()
+    }).with_children(|parent| {
+        parent.spawn_scene(cannonball);
+    })
+    .insert(Cannonball);
 }
 
 fn cannonball_movement(
@@ -433,12 +430,13 @@ fn cannonball_movement(
         transform.translation += forward * CANNONBALL_SPEED;
         i += 1;
     }
-    info!("{} cannonballs", i);
 }
 
 fn is_to_left_of_player(
-    enemy_transform: &GlobalTransform
+    player_t: &Transform,
+    other_t: &Transform
 ) -> bool {
-    let right = enemy_transform.right();
-    (-enemy_transform.translation).dot(right) < 0.0
+    let right = other_t.right();
+    let to_player = player_t.translation - other_t.translation;
+    to_player.dot(right) < 0.0
 }
